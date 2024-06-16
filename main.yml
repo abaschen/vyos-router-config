@@ -1,0 +1,46 @@
+---
+#- vyos.vyos.vyos_facts:
+#    gather_subset: all
+#    gather_network_resources: all
+
+- name: Set network config
+  hosts: all
+  tasks:
+  - name: Merge provided configuration with device configuration
+    vyos.vyos.vyos_interfaces:
+      config:
+      - name: eth1
+        description: LAN
+        enabled: true
+
+      - name: eth2
+        description: Management LAN
+
+      - name: eth4
+        description: WAN
+        mtu: 9216
+
+      - name: eth5
+        description: SFP2
+        mtu: 9216
+
+      - name: eth3
+        enabled: false
+      state: merged
+
+  - name: Set address modes
+    vyos.vyos.vyos_config:
+      lines:
+      # LAN router address
+      - set interface ethernet eth1 address 192.168.0.1/24
+      - set interface ethernet eth2 address 192.168.0.254/24
+      # SFP LAN
+  #    - set interface ethernet eth1 address 192.168.0.1/24
+      # WAN dhcp from provider
+      - set interface ethernet eth4 address dhcp
+
+  - name: Set hostname
+    vyos.vyos.vyos_hostname:
+      config:
+        hostname: "{{ inventory_hostname }}"
+      state: merged
