@@ -1,46 +1,325 @@
+# Home router setup
 ---
-#- vyos.vyos.vyos_facts:
-#    gather_subset: all
-#    gather_network_resources: all
-
 - name: Set network config
   hosts: all
   tasks:
-  - name: Merge provided configuration with device configuration
-    vyos.vyos.vyos_interfaces:
-      config:
-      - name: eth1
-        description: LAN
-        enabled: true
+    - name: Gather facts
+      vyos.vyos.vyos_facts:
+        gather_subset: config
+        gather_network_resources: all
+    - name: Set interfaces addresses
+      vyos.vyos.vyos_interfaces:
+        state: merged
+        config:
+          - name: eth1
+            description: LAN
+            enabled: true
 
-      - name: eth2
-        description: Management LAN
+          - name: eth2
+            description: Management LAN
 
-      - name: eth4
-        description: WAN
-        mtu: 9216
+          - name: eth4
+            description: WAN
+            mtu: 9216
 
-      - name: eth5
-        description: SFP2
-        mtu: 9216
+          - name: eth5
+            description: SFP2
+            mtu: 9216
 
-      - name: eth3
-        enabled: false
-      state: merged
+          - name: eth3
+            enabled: false
 
-  - name: Set address modes
-    vyos.vyos.vyos_config:
-      lines:
-      # LAN router address
-      - set interface ethernet eth1 address 192.168.0.1/24
-      - set interface ethernet eth2 address 192.168.0.254/24
-      # SFP LAN
-  #    - set interface ethernet eth1 address 192.168.0.1/24
-      # WAN dhcp from provider
-      - set interface ethernet eth4 address dhcp
+    - name: Set address modes
+      vyos.vyos.vyos_l3_interfaces:
+        state: merged
+        config:
+          - name: eth1
+            vifs:
+              - vlan_id: 9
+                ipv4:
+                  - address: 192.168.0.1/24
+          - name: eth2
+            ipv4:
+              - address: 192.168.0.144/24
+          - name: eth4
+            ipv4:
+              - address: dhcp
+            ipv6:
+              - address: dhcpv6
 
-  - name: Set hostname
-    vyos.vyos.vyos_hostname:
-      config:
-        hostname: "{{ inventory_hostname }}"
-      state: merged
+    - name: DHCP server
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set service dhcp-server listen-interface 'eth1.9'
+          - set service dhcp-server shared-network-name lan authoritative
+          - set service dhcp-server shared-network-name lan description 'LAN'
+          - set service dhcp-server shared-network-name lan option name-server '1.1.1.1'
+          - set service dhcp-server shared-network-name lan option name-server '1.0.0.1'
+          - set service dhcp-server shared-network-name lan subnet 192.168.0.0/24 subnet-id '2'
+          - set service dhcp-server shared-network-name lan subnet 192.168.0.0/24 option default-router '192.168.0.1'
+          - set service dhcp-server shared-network-name lan subnet 192.168.0.0/24 range scope1 start '192.168.0.100'
+          - set service dhcp-server shared-network-name lan subnet 192.168.0.0/24 range scope1 stop '192.168.0.200'
+          - set service dhcp-server shared-network-name lan subnet 192.168.0.0/24 static-mapping dev-ix-eth0 ip-address '192.168.0.254'
+          - set service dhcp-server shared-network-name lan subnet 192.168.0.0/24 static-mapping dev-ix-eth0 mac '02:fe:4b:38:c8:d3'
+          - set system option performance 'throughput'
+
+    # WAN dhcp from provider
+    - name: Set static routes
+      vyos.vyos.vyos_static_routes:
+        state: "{{ state_mode }}"
+        config:
+          - address_families:
+              - afi: ipv4
+                routes:
+                  - dest: "198.168.0.0/24"
+                    next_hops:
+                      - forward_router_address: 192.168.0.1
+    - name: Route to outside
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set protocols static route 0.0.0.0/0 dhcp-interface 'eth4'
+
+    - name: Set hostname
+      vyos.vyos.vyos_system:
+        host_name: "{{ inventory_hostname }}"
+        domain_name: baschen.is
+        name_server:
+          - 1.1.1.1
+          - 1.0.0.1
+
+    - name: Apply the provided configuration
+      vyos.vyos.vyos_logging_global:
+        state: "{{ state_mode }}"
+        config:
+          console:
+            facilities:
+              - facility: all
+                severity: info
+              - facility: local7
+                severity: err
+
+    # - name: Override ntp config
+    # https://github.com/ansible-collections/vyos.vyos/issues/339
+    #   vyos.vyos.vyos_ntp_global:
+    #     state: "{{ state_mode }}"
+    #     config:
+    #       servers:
+    #         - server: 0.ch.pool.ntp.org
+    #           options:
+    #             - pool
+    #         - server: 1.ch.pool.ntp.org
+    #           options:
+    #             - pool
+    - name: NTP config
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set service ntp server 0.ch.pool.ntp.org pool
+          - set service ntp server 1.ch.pool.ntp.org pool
+    - name: LLDP Interfaces
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set service lldp interface eth4
+          - set service lldp interface eth2.9
+          - set service lldp management-address 192.168.0.1
+
+    - name: General NAT masquerade
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set nat source rule 771 outbound-interface name 'eth4'
+          - set nat source rule 771 source address '192.168.0.0/24'
+          - set nat source rule 771 translation address 'masquerade'
+
+    # - name: NAT rule for HTTPS
+    #   vyos.vyos.vyos_config:
+    #     lines:
+    #       - set nat destination rule 443 description 'HTTPS to Ingress'
+    #       - set nat destination rule 443 destination port '443'
+    #       - set nat destination rule 443 inbound-interface name 'eth1'
+    #       - set nat destination rule 443 protocol 'tcp_udp'
+    #       - set nat destination rule 443 translation address '192.168.99.252'
+    #       - set nat destination rule 443 translation port '443'
+    - name: Define firewall globals
+      vyos.vyos.vyos_firewall_global:
+        config:
+          log_martians: true
+          syn_cookies: true
+          twa_hazards_protection: false
+          ping:
+            all: true
+            broadcast: false
+          state_policy:
+            - connection_type: established
+              action: accept
+              log: true
+            - connection_type: invalid
+              action: reject
+          route_redirects:
+            - afi: ipv4
+              ip_src_route: false
+              icmp_redirects:
+                send: true
+                receive: false
+          group:
+            network_group:
+              - name: inside-nets
+                description: Inside networks
+                members:
+                  - address: 192.168.0.0/24
+              # - name: MGMT
+              #   description: This group has the Management network addresses
+              #   members:
+              #     - address: 192.0.0.0/24
+        state: "{{ state_mode }}"
+    - name: Set conntrack
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set system conntrack modules ftp
+          - set system conntrack modules h323
+          - set system conntrack modules nfs
+          - set system conntrack modules pptp
+          - set system conntrack modules sip
+          - set system conntrack modules sqlnet
+          - set system conntrack modules tftp
+    - name: Define firewall rules
+      vyos.vyos.vyos_firewall_rules:
+        config:
+          - afi: ipv4
+            rule_sets:
+              - name: lan-local-v4
+                description: LAN to This Router IPv4
+                enable_default_log: true
+                default_action: drop
+                rules:
+                  - number: 1
+                    action: accept
+                    description: explicit allow inbound ssh always (anti-lockout)
+                    destination:
+                      port: 22
+                    protocol: tcp
+                    source:
+                      group:
+                        network_group: inside-nets
+                  - number: 2
+                    action: accept
+                    description: explicit allow dhcp
+                    destination:
+                      port: 67-68
+                    protocol: udp
+                    source:
+                      port: 67-68
+                      group:
+                        network_group: inside-nets
+                  - number: 3
+                    action: accept
+                    description: default allow from known nets to router
+                    destination:
+                      address: 0.0.0.0
+                    source:
+                      group:
+                        network_group: inside-nets
+
+              - name: local-lan-v4
+                description: This Router to LAN IPv4
+                enable_default_log: true
+                default_action: drop
+                rules:
+                  - number: 2
+                    action: accept
+                    description: allow dhcp
+                    destination:
+                      port: 67-68
+                    protocol: udp
+                    source:
+                      port: 67-68
+                  - number: 3
+                    action: accept
+                    description: default allow from known nets to router
+                    destination:
+                      address: 0.0.0.0
+                    source:
+                      group:
+                        network_group: inside-nets
+
+              - name: wan-lan-v4
+                description: WAN to This Router IPv4
+                enable_default_log: true
+                default_action: drop
+                rules:
+                  - number: 1
+                    action: accept
+                    state:
+                      established: true
+                      related: true
+                  - number: 2
+                    action: drop
+                    state:
+                      invalid: true
+                  - number: 3
+                    action: accept
+                    description: DHCP4 replies
+                    destination:
+                      port: 67-68
+                    protocol: udp
+                    source:
+                      port: 67-68
+
+              - name: local-wan-v4
+                description: This Router to WAN IPv4
+                enable_default_log: true
+                default_action: drop
+                rules:
+                  - number: 1
+                    action: accept
+
+              # - name: wan-nat-v4
+              #   description: WAN to ingress
+              #   enable_default_log: true
+              #   default_action: drop
+              #   rules:
+              #     - number: 443
+              #       action: accept
+              #       destination:
+              #         address: 192.168.0.201
+              #         port: 443
+              #       protocol: tcp_udp
+
+        state: "{{ state_mode }}"
+    - name: Firewall zones
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set firewall zone wan default-action 'drop'
+          - set firewall zone wan from lan firewall name 'lan-wan-v4'
+          - set firewall zone wan from local firewall name 'local-wan-v4'
+          - set firewall zone wan interface 'eth4'
+
+          - set firewall zone lan default-action 'drop'
+          - set firewall zone lan from local firewall name 'local-lan-v4'
+          - set firewall zone lan from wan firewall name 'wan-lan-v4'
+          - set firewall zone lan interface 'eth5'
+          - set firewall zone lan interface 'eth1.9'
+
+          - set firewall zone local default-action 'drop'
+          - set firewall zone local from lan firewall name 'lan-local-v4'
+          - set firewall zone local from wan firewall name 'wan-local-v4'
+          - set firewall zone local local-zone
+    - name: DHCP6 Options
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set interfaces ethernet eth4 dhcpv6-options pd 0 interface eth1.9 address '1'
+          - set interfaces ethernet eth4 dhcpv6-options pd 0 length '48'
+          - set interfaces ethernet eth4 ipv6 address autoconf
+    - name: IGMP Proxy for TV
+      vyos.vyos.vyos_config:
+        save: true
+        lines:
+          - set protocols igmp-proxy interface eth4 alt-subnet '0.0.0.0/0'
+          - set protocols igmp-proxy interface eth4 role 'upstream'
+          - set protocols igmp-proxy interface eth2.9 role 'downstream'
